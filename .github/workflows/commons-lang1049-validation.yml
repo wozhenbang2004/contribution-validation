@@ -1,0 +1,47 @@
+name: Commons Lang default goals (9909a120)
+
+on:
+  push:
+    branches: [main]
+    paths: [.github/workflows/commons-lang1049-validation.yml]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  default-goals:
+    name: Default Maven goals / JDK 21
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - name: Check out the exact reviewed commit
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          repository: wozhenbang2004/commons-lang
+          ref: 9909a120c3fd8414f58c326c38e6c6bd384356bd
+          persist-credentials: false
+
+      - name: Set up JDK 21
+        uses: actions/setup-java@d1374f8ac74474200d16ef8ecee22c7ae7a51880 # v6.3.0
+        with:
+          distribution: temurin
+          java-version: '21'
+
+      - name: Verify the reviewed source
+        run: |
+          test "$(git rev-parse HEAD)" = 9909a120c3fd8414f58c326c38e6c6bd384356bd
+          sha256sum --check --status <<'SUMS'
+          83e27ded190858bc39f9e5e59fe46a42022eb4d5dffc1c5883e342b49ad95601  src/changes/changes.xml
+          2ef85b9c52069f68407361d5e4a34f3d859a0684e5bfbe09e9cb47f731c1792c  src/main/java/org/apache/commons/lang3/SerializationUtils.java
+          5e3808bcef46fd021d8f94a253948a7dc07101064e1075a6c626a7b92d37c67d  src/test/java/org/apache/commons/lang3/SerializationUtilsTest.java
+          SUMS
+
+      - name: Run the unchanged default Maven goals
+        run: mvn --errors --show-version --batch-mode --no-transfer-progress -Ddoclint=all
+
+      - name: Verify reviewed files remain unchanged
+        if: always()
+        run: |
+          git diff --stat
+          git diff --exit-code -- src/changes/changes.xml src/main/java/org/apache/commons/lang3/SerializationUtils.java src/test/java/org/apache/commons/lang3/SerializationUtilsTest.java
