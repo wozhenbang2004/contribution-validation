@@ -1,0 +1,72 @@
+name: Coverage plugin inspection (495c3a00)
+
+on:
+  push:
+    branches: [main]
+    paths: [.github/workflows/coverage920.yml]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: coverage920-${{ github.ref }}
+  cancel-in-progress: true
+
+defaults:
+  run:
+    shell: bash
+
+env:
+  PIP_DISABLE_PIP_VERSION_CHECK: 1
+  COVERAGE_IGOR_VERBOSE: 2
+  HYPOTHESIS_PROFILE: ci
+  COVERAGE_COVERAGE: "yes"
+
+jobs:
+  upstream-tox:
+    name: Upstream tox ${{ matrix.tox-env }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      max-parallel: 1
+      matrix:
+        include:
+          - python-version: "3.12"
+            tox-env: py312
+          - python-version: "3.13"
+            tox-env: py313
+    env:
+      COVERAGE_CONTEXT: ${{ matrix.tox-env }}.ubuntu
+    steps:
+      - name: Check out reviewed contribution
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          repository: wozhenbang2004/coveragepy
+          ref: 495c3a000cee11da4ff940140391274a91c70fca
+          persist-credentials: false
+      - name: Verify reviewed revision and files
+        run: |
+          test "$(git rev-parse HEAD)" = 495c3a000cee11da4ff940140391274a91c70fca
+          sha256sum --check <<'SUMS'
+          32fd5de5f2d83950c47609646176d4aaddbe395e821dfb002f89da256bbfe00f  coverage/control.py
+          6573cc6e13e8db9b17ec73ac505819966fd1aad967c59c07264f451b26f11c75  coverage/plugin.py
+          13b6c832c66ec20ce0682fa47fd8f4d4d9305adcfe4dcf2dedc79942440c503f  tests/test_plugins.py
+          54a20b29dfc0be89722bc39c14ce314cdf86c0012341ed18720cca7e038baa3a  news/20261123_920.rst
+          SUMS
+      - name: Set up Python
+        uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
+        with:
+          python-version: ${{ matrix.python-version }}
+      - name: Show Python environment
+        run: |
+          python -VV
+          python -m site
+      - name: Install upstream pinned tox dependencies
+        run: python -m pip install --require-hashes -r requirements/tox.txt
+      - name: Run complete upstream tox environment
+        run: python -m tox -e ${{ matrix.tox-env }} -- -rfsEX
+      - name: Verify reviewed source remains unchanged
+        if: always()
+        run: git diff --exit-code -- coverage/control.py coverage/plugin.py tests/test_plugins.py news/20261123_920.rst
