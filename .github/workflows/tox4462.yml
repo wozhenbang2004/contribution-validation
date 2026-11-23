@@ -1,0 +1,112 @@
+name: Tox 4462 exact-head validation
+
+on:
+  workflow_dispatch:
+  push:
+    paths:
+      - .github/workflows/tox4462.yml
+
+permissions:
+  contents: read
+
+concurrency:
+  group: tox4462-validation
+  cancel-in-progress: false
+
+jobs:
+  tests:
+    name: Full tests on Python ${{ matrix.python }}
+    runs-on: ubuntu-26.04
+    timeout-minutes: 45
+    strategy:
+      fail-fast: false
+      max-parallel: 2
+      matrix:
+        python: ["3.11", "3.15"]
+    env:
+      TEST_PYTHON: ${{ matrix.python }}
+      PYTEST_XDIST_AUTO_NUM_WORKERS: "0"
+      DIFF_AGAINST: 794908a7f242ef6c82450a9ad7207d3a9bb2fa7f
+    steps:
+      - uses: actions/checkout@v7.0.1
+        with:
+          repository: wozhenbang2004/tox
+          ref: ae2209da492480dfa4e743565ad7ae472b142d42
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Verify source identity and complete changed-file set
+        shell: bash
+        run: |
+          python3 - <<'PY'
+          import hashlib, pathlib, subprocess
+          assert subprocess.check_output(['git', 'rev-parse', 'HEAD'], text=True).strip() == 'ae2209da492480dfa4e743565ad7ae472b142d42'
+          expected = {
+              'src/tox/tox_env/python/pip/req/args.py': 'd4375a11859d0e6aa5217ea9e2cd534a20d62b96e42f432fd1847790ec34c42c',
+              'tests/tox_env/python/pip/req/test_file.py': '76dc6f8794f622b08d2cc8c832db36b5f6f763917e7f905bcf68f4d6fe232f0f',
+              'docs/changelog/4462.bugfix.rst': '0c6b364f0319c16e017322dd8f37998570a4b6c497562edc89864efa7bf41f2c',
+          }
+          changed = subprocess.check_output(['git', 'diff', '--name-only', '794908a7f242ef6c82450a9ad7207d3a9bb2fa7f', 'HEAD'], text=True).splitlines()
+          assert sorted(changed) == sorted(expected), changed
+          for name, digest in expected.items():
+              assert hashlib.sha256(pathlib.Path(name).read_bytes()).hexdigest() == digest, name
+          print('Reviewed head, file set and file hashes verified.')
+          PY
+      - uses: astral-sh/setup-uv@v10.3.3
+        with:
+          version: latest-known
+          python-version: "3.15"
+          enable-cache: false
+      - name: Install the test and packaging interpreters
+        run: uv python install 3.15 "$TEST_PYTHON"
+      - name: Install tox from the reviewed source
+        run: uv tool install --python-preference only-managed --python "$TEST_PYTHON" tox@.
+      - name: Prepare the unmodified upstream test environment
+        run: tox run -vv --notest --skip-missing-interpreters false -e "$TEST_PYTHON"
+      - name: Run the complete upstream test and coverage commands
+        run: tox run --skip-pkg-install -e "$TEST_PYTHON"
+      - name: Confirm validation did not change tracked source
+        if: always()
+        run: git diff --exit-code
+
+  quality:
+    name: Hooks, types, documentation and package metadata
+    runs-on: ubuntu-26.04
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v7.0.1
+        with:
+          repository: wozhenbang2004/tox
+          ref: ae2209da492480dfa4e743565ad7ae472b142d42
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Verify source identity and complete changed-file set
+        shell: bash
+        run: |
+          python3 - <<'PY'
+          import hashlib, pathlib, subprocess
+          assert subprocess.check_output(['git', 'rev-parse', 'HEAD'], text=True).strip() == 'ae2209da492480dfa4e743565ad7ae472b142d42'
+          expected = {
+              'src/tox/tox_env/python/pip/req/args.py': 'd4375a11859d0e6aa5217ea9e2cd534a20d62b96e42f432fd1847790ec34c42c',
+              'tests/tox_env/python/pip/req/test_file.py': '76dc6f8794f622b08d2cc8c832db36b5f6f763917e7f905bcf68f4d6fe232f0f',
+              'docs/changelog/4462.bugfix.rst': '0c6b364f0319c16e017322dd8f37998570a4b6c497562edc89864efa7bf41f2c',
+          }
+          changed = subprocess.check_output(['git', 'diff', '--name-only', '794908a7f242ef6c82450a9ad7207d3a9bb2fa7f', 'HEAD'], text=True).splitlines()
+          assert sorted(changed) == sorted(expected), changed
+          for name, digest in expected.items():
+              assert hashlib.sha256(pathlib.Path(name).read_bytes()).hexdigest() == digest, name
+          print('Reviewed head, file set and file hashes verified.')
+          PY
+      - uses: astral-sh/setup-uv@v10.3.3
+        with:
+          version: latest-known
+          python-version: "3.15"
+          enable-cache: false
+      - name: Install both supported-boundary interpreters
+        run: uv python install 3.11 3.15
+      - name: Install tox from the reviewed source
+        run: uv tool install --python-preference only-managed --python 3.15 tox@.
+      - name: Run the contribution checks
+        run: tox run --skip-missing-interpreters false -e fix,type,type-min,docs,pkg_meta
+      - name: Confirm validation did not change tracked source
+        if: always()
+        run: git diff --exit-code
