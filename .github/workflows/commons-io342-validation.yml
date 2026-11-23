@@ -1,0 +1,49 @@
+name: Commons IO default goals (10ce0e21)
+
+on:
+  push:
+    branches: [main]
+    paths: [.github/workflows/commons-io342-validation.yml]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  default-goals:
+    name: Default Maven goals / JDK 21
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - name: Check out the exact reviewed commit
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          repository: wozhenbang2004/commons-io
+          ref: 10ce0e210fac918d5d6a2e2a691cca342963a244
+          persist-credentials: false
+
+      - name: Set up JDK 21
+        uses: actions/setup-java@d1374f8ac74474200d16ef8ecee22c7ae7a51880 # v6.3.0
+        with:
+          distribution: temurin
+          java-version: '21'
+
+      - name: Verify the reviewed source
+        run: |
+          test "$(git rev-parse HEAD)" = 10ce0e210fac918d5d6a2e2a691cca342963a244
+          sha256sum --check --status <<'SUMS'
+          d6ecaffa43820ff8b95cc1a37bbcc5ce2674176335076ade9f2e37e5fbf0f3e7  src/main/java/org/apache/commons/io/ByteOrderMark.java
+          301a5d2ccfeabdfc73b84eb18b761075d6a3e5e75d642c56cbf085a40c050a71  src/main/java/org/apache/commons/io/input/BOMInputStream.java
+          5ef42ba3bc048a219a4a775c0c550f754db575ae36abaaf24a1a745ea2da2646  src/test/java/org/apache/commons/io/ByteOrderMarkTest.java
+          68c5cea83685cec2c7b1ce06f2503948514277ddcce5b0c09fe1244ec1eb604d  src/test/java/org/apache/commons/io/input/BOMInputStreamTest.java
+          b9eb3dba8632ed6b077311f16013a848908cb51dda17f091707b1517f51a6628  src/changes/changes.xml
+          SUMS
+
+      - name: Run the unchanged default Maven goals
+        run: mvn --errors --show-version --batch-mode --no-transfer-progress -DtrimStackTrace=false
+
+      - name: Verify reviewed files remain unchanged
+        if: always()
+        run: |
+          git diff --stat
+          git diff --exit-code -- src/main/java/org/apache/commons/io/ByteOrderMark.java src/main/java/org/apache/commons/io/input/BOMInputStream.java src/test/java/org/apache/commons/io/ByteOrderMarkTest.java src/test/java/org/apache/commons/io/input/BOMInputStreamTest.java src/changes/changes.xml
