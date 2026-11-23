@@ -1,0 +1,68 @@
+name: Datafaker Chinese locale contributions
+
+on:
+  push:
+    branches: [main]
+    paths: [.github/workflows/datafaker-locales-validation.yml]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  maven-install:
+    name: ${{ matrix.change }} / JDK 17
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - change: zh-CN job
+            head: cf62e7f4963f93df61e1c2d14d68930a0b8cefde
+            cn-sha256: 98789582caa67729180fcf354948e37aaa1b8a5d9e772b6f8fe390a29d0315c3
+            tw-sha256: e8795f33b6e6c9d3f5d403d46386f6777518a5aac9b5b0b72520fc2a09b3409d
+            test-file: src/test/java/net/datafaker/providers/base/JobTest.java
+            test-sha256: cf09ed81ecfd9811fba11e9ffd4cb9c18d8e040a25d31183906e5cb3221ec5a2
+          - change: Chinese colors
+            head: 6d71e612d3647dc8530a8e322123c5b136fc75cd
+            cn-sha256: 52d51c6c2247657c163b89480a392c09a80aa7aa2601149cc41dfb0f4afabbde
+            tw-sha256: ae1d432d5255850e9d1d977071ec1692c9339938aba261742fdd7a7b25282eb2
+            test-file: src/test/java/net/datafaker/providers/base/ColorTest.java
+            test-sha256: a281ca41ce54055c398de5dd2b0e10929316e905a1a16188cb9941f7f51376ac
+    steps:
+      - name: Check out the exact contribution head
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          repository: wozhenbang2004/datafaker
+          ref: ${{ matrix.head }}
+          persist-credentials: false
+      - name: Set up JDK 17
+        uses: actions/setup-java@d1374f8ac74474200d16ef8ecee22c7ae7a51880 # v6.3.0
+        with:
+          distribution: temurin
+          java-version: '17'
+      - name: Verify reviewed source identity
+        shell: bash
+        env:
+          EXPECTED_HEAD: ${{ matrix.head }}
+          EXPECTED_CN_SHA256: ${{ matrix.cn-sha256 }}
+          EXPECTED_TW_SHA256: ${{ matrix.tw-sha256 }}
+          EXPECTED_TEST_FILE: ${{ matrix.test-file }}
+          EXPECTED_TEST_SHA256: ${{ matrix.test-sha256 }}
+        run: |
+          set -euo pipefail
+          test "$(git rev-parse HEAD)" = "$EXPECTED_HEAD"
+          sha256sum --check --status <<'SUMS'
+          77e839c0fcaa16304b6ad795d71c5b970a3f0c9ba147aec054be69d3ec1d8738  pom.xml
+          04e23d1cad3b627fd083f6ba89590ba9917a45133c49a1e59a7e6355811dd2f6  .mvn/wrapper/maven-wrapper.properties
+          cae96cef89ebea3531221f4ae17c23cf8edf67d00eae8306d4186ae1bbed4d02  mvnw
+          SUMS
+          printf '%s  %s\n' "$EXPECTED_CN_SHA256" src/main/resources/zh-CN.yml "$EXPECTED_TW_SHA256" src/main/resources/zh-TW.yml "$EXPECTED_TEST_SHA256" "$EXPECTED_TEST_FILE" | sha256sum --check --status
+          git rev-parse HEAD
+          java -version
+      - name: Run the normal Maven install lifecycle
+        run: ./mvnw -B -ntp install -PnoGpg
+      - name: Verify tracked source remains unchanged
+        if: always()
+        run: git diff --exit-code -- src pom.xml mvnw .mvn/wrapper/maven-wrapper.properties
