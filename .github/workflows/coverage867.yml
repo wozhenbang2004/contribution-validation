@@ -1,0 +1,71 @@
+name: Coverage finally reasons (87801789)
+
+on:
+  push:
+    branches: [main]
+    paths: [.github/workflows/coverage867.yml]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: coverage867-${{ github.ref }}
+  cancel-in-progress: true
+
+defaults:
+  run:
+    shell: bash
+
+env:
+  PIP_DISABLE_PIP_VERSION_CHECK: 1
+  COVERAGE_IGOR_VERBOSE: 2
+  HYPOTHESIS_PROFILE: ci
+  COVERAGE_COVERAGE: "yes"
+
+jobs:
+  upstream-tox:
+    name: Upstream tox ${{ matrix.tox-env }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      max-parallel: 1
+      matrix:
+        include:
+          - python-version: "3.12"
+            tox-env: py312
+          - python-version: "3.13"
+            tox-env: py313
+    env:
+      COVERAGE_CONTEXT: ${{ matrix.tox-env }}.ubuntu
+    steps:
+      - name: Check out reviewed contribution
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          repository: wozhenbang2004/coveragepy
+          ref: 87801789fca3170a65bb8cffe0bf6a168cf8efdd
+          persist-credentials: false
+      - name: Verify reviewed revision and files
+        run: |
+          test "$(git rev-parse HEAD)" = 87801789fca3170a65bb8cffe0bf6a168cf8efdd
+          sha256sum --check <<'SUMS'
+          15c9cdbc646cf4fd0dc19b7a3a6d5b5029e26cf3d52e60bfb71d1d709db2339c  coverage/parser.py
+          fac815722fa54179bd84072961670167a00cb3cb9ef9451b4039f7eb0b9a5cd1  tests/test_arcs.py
+          03c56f420322b2a42c3e416669a199707b1144a124b76c8ccde6f712049c61eb  news/20261123_867.rst
+          SUMS
+      - name: Set up Python
+        uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
+        with:
+          python-version: ${{ matrix.python-version }}
+      - name: Show Python environment
+        run: |
+          python -VV
+          python -m site
+      - name: Install upstream pinned tox dependencies
+        run: python -m pip install --require-hashes -r requirements/tox.txt
+      - name: Run complete upstream tox environment
+        run: python -m tox -e ${{ matrix.tox-env }} -- -rfsEX
+      - name: Verify reviewed source remains unchanged
+        if: always()
+        run: git diff --exit-code -- coverage/parser.py tests/test_arcs.py news/20261123_867.rst
