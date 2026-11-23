@@ -1,0 +1,56 @@
+name: Fiber required gates (2329668)
+
+on:
+  push:
+    branches: [main]
+    paths: [.github/workflows/fiber-validation.yml]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  gate:
+    name: ${{ matrix.gate }} / Go ${{ matrix.go-version }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        gate: [audit, generate, betteralign, format, lint, test]
+        go-version: [1.26.11]
+        include:
+          - gate: test
+            go-version: 1.27.x
+    steps:
+      - name: Check out the exact proposed commit
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          repository: wozhenbang2004/fiber
+          ref: 2329668b8aed678d7723735e0787d7936a4e65d5
+          persist-credentials: false
+
+      - name: Install Go
+        uses: actions/setup-go@d8cbb8045d7f43706b9177cceb36c1f91a6644d5 # v7.1.0
+        with:
+          go-version: ${{ matrix.go-version }}
+          cache: false
+
+      - name: Verify the reviewed source
+        run: |
+          test "$(git rev-parse HEAD)" = 2329668b8aed678d7723735e0787d7936a4e65d5
+          go version
+          sha256sum -c <<'SUMS'
+          559c87119bd94a7a5d64d5e0c5efdd5820580cc1224d037f98989a3fbffa2bb8  app.go
+          1a2097bc974f74afbf2220d57f9fff6edfe7b335aee52a4a88f07fb219df5365  app_test.go
+          SUMS
+
+      - name: Run the unchanged Makefile target
+        run: make "${{ matrix.gate }}"
+
+      - name: Show generated changes and verify the patch stays formatted
+        if: always()
+        run: |
+          git diff --stat
+          git diff
+          git diff --exit-code -- app.go app_test.go
