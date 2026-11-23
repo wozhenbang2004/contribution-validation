@@ -1,0 +1,87 @@
+name: Lipgloss border background - exact head
+
+on:
+  workflow_dispatch:
+  push:
+    paths:
+      - '.github/workflows/lipgloss119-exact-head.yml'
+
+permissions:
+  contents: read
+
+env:
+  GOMAXPROCS: '2'
+  GOFLAGS: '-p=2'
+  GOPROXY: https://proxy.golang.org
+
+jobs:
+  build:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - run: git config --global core.autocrlf input
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          repository: wozhenbang2004/lipgloss
+          ref: 08d593d8b7e7e3843fcbe35d71863199772e5cdd
+          persist-credentials: false
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e
+        with:
+          go-version: stable
+      - name: Confirm exact source
+        shell: bash
+        run: test "$(git rev-parse HEAD)" = 08d593d8b7e7e3843fcbe35d71863199772e5cdd
+      - run: go version
+      - run: go mod tidy
+      - run: git diff --exit-code
+      - run: go build ./...
+      - run: go test -count=1 ./...
+
+  lint:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - run: git config --global core.autocrlf input
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          repository: wozhenbang2004/lipgloss
+          ref: 08d593d8b7e7e3843fcbe35d71863199772e5cdd
+          persist-credentials: false
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e
+        with:
+          go-version: '1.26.11'
+      - run: go install github.com/golangci/golangci-lint/v2/cmd/golangci-lint@v2.9.0
+      - run: golangci-lint version
+      - run: golangci-lint fmt --diff
+      - run: golangci-lint run --config=.golangci.yml --timeout=10m ./...
+
+  coverage-examples-vulnerabilities:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          repository: wozhenbang2004/lipgloss
+          ref: 08d593d8b7e7e3843fcbe35d71863199772e5cdd
+          persist-credentials: false
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e
+        with:
+          go-version: '1.26.11'
+      - run: go test -race -count=1 -covermode atomic -coverprofile=profile.cov ./...
+      - run: go vet ./...
+      - run: go mod tidy
+      - run: git diff --exit-code
+      - name: Validate every example
+        working-directory: examples
+        run: |
+          go mod tidy
+          git diff --exit-code
+          go build ./...
+          go test -count=1 ./...
+      - run: go install golang.org/x/vuln/cmd/govulncheck@v1.10.0
+      - run: govulncheck ./...
