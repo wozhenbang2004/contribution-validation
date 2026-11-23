@@ -1,0 +1,97 @@
+name: Datafaker Chinese locale baseline (0e704873)
+
+on:
+  push:
+    branches: [main]
+    paths: [.github/workflows/datafaker-baseline-validation.yml]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  baseline-consumer:
+    name: Compile and inspect locale output / JDK 17
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - name: Check out the exact upstream baseline
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          repository: datafaker-net/datafaker
+          ref: 0e704873f28eed353a580f87d2ce1dd9b4114f4c
+          persist-credentials: false
+      - name: Set up JDK 17
+        uses: actions/setup-java@d1374f8ac74474200d16ef8ecee22c7ae7a51880 # v6.3.0
+        with:
+          distribution: temurin
+          java-version: '17'
+      - name: Verify baseline identity and record source hashes
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$(git rev-parse HEAD)" = 0e704873f28eed353a580f87d2ce1dd9b4114f4c
+          sha256sum --check --status <<'SUMS'
+          77e839c0fcaa16304b6ad795d71c5b970a3f0c9ba147aec054be69d3ec1d8738  pom.xml
+          04e23d1cad3b627fd083f6ba89590ba9917a45133c49a1e59a7e6355811dd2f6  .mvn/wrapper/maven-wrapper.properties
+          cae96cef89ebea3531221f4ae17c23cf8edf67d00eae8306d4186ae1bbed4d02  mvnw
+          25bb15a467bd8a16bad0b26d538a4f5f31368a6382f198e4ba4ddb2664e5faf9  src/main/java/net/datafaker/Faker.java
+          ff82a94ab2290eb92cb475a50f365890fc94fca03c2225a2415f4df006266e2d  src/main/java/net/datafaker/providers/base/Job.java
+          4e0244307ef38ce252cc16af69f0a4bd0a8bbdaeeff57bf2b298fb1809bbbffe  src/main/java/net/datafaker/providers/base/Color.java
+          5bd9b7779d152ce53bce9c121c34fdc7b4d25fb20e15749d2950ea5d0157bb3f  src/main/resources/zh-CN.yml
+          e8795f33b6e6c9d3f5d403d46386f6777518a5aac9b5b0b72520fc2a09b3409d  src/main/resources/zh-TW.yml
+          SUMS
+          mkdir -p baseline-evidence
+          git rev-parse HEAD > baseline-evidence/source-commit.txt
+          git ls-files -z src/main pom.xml mvnw .mvn/wrapper/maven-wrapper.properties | xargs -0 sha256sum > baseline-evidence/source-sha256.txt
+          java -version 2>&1 | tee baseline-evidence/java-version.txt
+      - name: Compile baseline and copy its declared runtime dependencies
+        shell: bash
+        run: |
+          set -euo pipefail
+          ./mvnw -B -ntp compile dependency:copy-dependencies -DincludeScope=runtime -DoutputDirectory=target/runtime-dependencies -PnoGpg 2>&1 | tee baseline-evidence/build.log
+      - name: Run the standalone Chinese locale consumer
+        shell: bash
+        run: |
+          set -euo pipefail
+          cat > baseline-evidence/ChineseLocaleConsumer.java <<'JAVA'
+          import java.util.Locale;
+          import java.util.Random;
+          import net.datafaker.Faker;
+
+          public class ChineseLocaleConsumer {
+              public static void main(String[] args) {
+                  for (Locale locale : new Locale[] {Locale.SIMPLIFIED_CHINESE, Locale.TRADITIONAL_CHINESE}) {
+                      Faker faker = new Faker(locale, new Random(1));
+                      System.out.println("locale=" + locale.toLanguageTag());
+                      System.out.println("color.name=" + faker.color().name());
+                      System.out.println("job.field=" + faker.job().field());
+                      System.out.println("job.seniority=" + faker.job().seniority());
+                      System.out.println("job.position=" + faker.job().position());
+                      System.out.println("job.keySkills=" + faker.job().keySkills());
+                      System.out.println("job.title=" + faker.job().title());
+                      System.out.println("job.employment_type=" + faker.expression("#{job.employment_type}"));
+                      System.out.println("job.education_level=" + faker.expression("#{job.education_level}"));
+                  }
+              }
+          }
+          JAVA
+          mkdir -p baseline-evidence/consumer-classes
+          javac -encoding UTF-8 -cp 'target/classes:target/runtime-dependencies/*' -d baseline-evidence/consumer-classes baseline-evidence/ChineseLocaleConsumer.java
+          java -cp 'baseline-evidence/consumer-classes:target/classes:target/runtime-dependencies/*' ChineseLocaleConsumer 2>&1 | tee baseline-evidence/consumer.log
+          find target/classes target/runtime-dependencies -type f -print0 | sort -z | xargs -0 sha256sum > baseline-evidence/runtime-sha256.txt
+      - name: Verify that the baseline source is unchanged
+        if: always()
+        shell: bash
+        run: git diff --exit-code -- src/main pom.xml mvnw .mvn/wrapper/maven-wrapper.properties
+      - name: Save baseline runtime and consumer evidence
+        if: always()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: datafaker-baseline-0e704873
+          retention-days: 7
+          if-no-files-found: error
+          path: |
+            target/classes
+            target/runtime-dependencies
+            baseline-evidence
