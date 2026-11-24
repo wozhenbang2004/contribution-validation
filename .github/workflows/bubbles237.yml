@@ -62,8 +62,6 @@ jobs:
       - name: Prepare identical consumer and regression cases
         if: matrix.os == 'ubuntu-latest' && matrix.go == '1.27.x'
         run: |
-          gofmt -d ../base/timer/timer.go ../base/timer/timer_test.go
-          gofmt -d timer/timer.go timer/timer_test.go timer/timer_accuracy_test.go
           mkdir -p ../validation
           cp timer/timer_accuracy_test.go ../base/timer/
           cat > ../validation/timer-consumer.go <<'GOFILE'
@@ -181,12 +179,31 @@ jobs:
       - name: Run focused race check and regressions
         if: matrix.os == 'ubuntu-latest' && matrix.go == '1.27.x'
         run: go test -count=1 -race -v ./timer | tee ../timer-after.log
+      - name: Check formatting against unchanged upstream
+        if: matrix.os == 'ubuntu-latest' && matrix.go == '1.27.x'
+        run: |
+          python - <<'PYFORMAT'
+          import subprocess
+          import sys
+
+          def formatting_diff(path):
+              result = subprocess.run(['gofmt', '-d', path], capture_output=True, text=True)
+              print(path)
+              print(result.stdout, end='')
+              print(result.stderr, end='', file=sys.stderr)
+              assert result.returncode in (0, 1) and not result.stderr, 'gofmt failed'
+              return '\n'.join(line for line in result.stdout.splitlines()
+                               if not line.startswith(('diff ', '--- ', '+++ ')))
+
+          before = formatting_diff('../base/timer/timer_test.go')
+          after = formatting_diff('timer/timer_test.go')
+          assert after == before, 'existing test file introduced a formatting difference'
+          for path in ('timer/timer.go', 'timer/timer_accuracy_test.go'):
+              assert not formatting_diff(path), f'formatting difference in {path}'
+          print('Only the four unchanged upstream spacing differences remain')
+          PYFORMAT
       - name: Lint with upstream version
         if: matrix.os == 'ubuntu-latest' && matrix.go == '1.27.x'
         run: |
           go install github.com/golangci/golangci-lint/v2/cmd/golangci-lint@v2.13.1
           golangci-lint run --timeout 10m
-      - name: Check Go formatting
-        run: |
-          gofmt -d timer/timer.go timer/timer_test.go timer/timer_accuracy_test.go
-          test -z "$(gofmt -l timer/timer.go timer/timer_test.go timer/timer_accuracy_test.go)"
