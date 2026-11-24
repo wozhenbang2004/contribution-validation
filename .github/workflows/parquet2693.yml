@@ -1,0 +1,51 @@
+name: Parquet 2693 complete upstream verification
+
+on:
+  workflow_dispatch:
+  push:
+    paths:
+      - .github/workflows/parquet2693.yml
+
+permissions:
+  contents: read
+
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          repository: wozhenbang2004/parquet-java
+          ref: 6aca27533ab0e872a71a5c4696bf7c4c567c5e8a
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Verify reviewed source identity and scope
+        run: |
+          test "$(git rev-parse HEAD)" = '6aca27533ab0e872a71a5c4696bf7c4c567c5e8a'
+          test "$(git merge-base d6fb2c8cd8dda3684c350b4016cc85905d31a8d5 HEAD)" = 'd6fb2c8cd8dda3684c350b4016cc85905d31a8d5'
+          printf '%s\n' 'fd629684c7d4abcfd15448495c2afb34d108ef25da386899df8abdfb8a298feb  parquet-cli/src/main/java/org/apache/parquet/cli/commands/ShowBloomFilterCommand.java' '003818b71e8eba3a76999c2a1586b48fc8646993e89ee0b41c4941820adccb4c  parquet-cli/src/test/java/org/apache/parquet/cli/BloomFilterCliTest.java' | sha256sum --check --strict
+          git diff --name-only d6fb2c8cd8dda3684c350b4016cc85905d31a8d5 HEAD > /tmp/actual-files
+          printf '%s\n' 'parquet-cli/src/main/java/org/apache/parquet/cli/commands/ShowBloomFilterCommand.java' 'parquet-cli/src/test/java/org/apache/parquet/cli/BloomFilterCliTest.java' > /tmp/expected-files
+          diff -u /tmp/expected-files /tmp/actual-files
+          git diff --check d6fb2c8cd8dda3684c350b4016cc85905d31a8d5 HEAD
+      - name: Set up JDK 17
+        uses: actions/setup-java@d1374f8ac74474200d16ef8ecee22c7ae7a51880 # v6.3.0
+        with:
+          distribution: temurin
+          java-version: '17'
+      - name: before_install
+        env:
+          CI_TARGET_BRANCH: master
+        run: bash dev/ci-before_install.sh
+      - name: install
+        run: ./mvnw install --batch-mode -DskipTests=true -Dmaven.javadoc.skip=true -Dsource.skip=true -Djava.version=17
+      - name: verify
+        env:
+          TEST_CODECS: uncompressed,brotli,gzip,snappy,zstd
+          JAVA_VERSION: '17'
+        run: ./mvnw verify --batch-mode javadoc:javadoc
+      - name: generate published JARs and verify LICENSE and NOTICE
+        run: |
+          ./mvnw --batch-mode process-resources source:jar-no-fork javadoc:jar
+          ./dev/check-jar-license-and-notice.sh
