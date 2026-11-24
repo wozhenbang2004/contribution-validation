@@ -8,7 +8,7 @@ permissions:
 
 env:
   JSQL_BASE_HEAD: 247e31c557271515d074d23a5f5d11bde6e7f3c1
-  JSQL_CANDIDATE_HEAD: 73f8b7fb400a3a55686315b15f7362853ad7303a
+  JSQL_CANDIDATE_HEAD: 2d2616cae391a9dfcf71f508f1432df82336db2d
 
 jobs:
   validate:
@@ -18,7 +18,7 @@ jobs:
       - uses: actions/checkout@v5
         with:
           repository: wozhenbang2004/JSqlParser
-          ref: 73f8b7fb400a3a55686315b15f7362853ad7303a
+          ref: 2d2616cae391a9dfcf71f508f1432df82336db2d
           path: source
           fetch-depth: 0
           persist-credentials: false
