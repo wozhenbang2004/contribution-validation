@@ -1,0 +1,82 @@
+name: JSqlParser 2804 existing contracts
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+env:
+  JSQL_BASE_HEAD: 247e31c557271515d074d23a5f5d11bde6e7f3c1
+  JSQL_CANDIDATE_HEAD: 9997aa674cd7c20bfe1f6c9250951cc5e44fdda1
+
+jobs:
+  contracts:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - version: baseline
+            head: 247e31c557271515d074d23a5f5d11bde6e7f3c1
+          - version: candidate
+            head: 9997aa674cd7c20bfe1f6c9250951cc5e44fdda1
+    name: Existing contracts (${{ matrix.version }})
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          repository: wozhenbang2004/JSqlParser
+          ref: ${{ matrix.head }}
+          fetch-depth: 0
+          persist-credentials: false
+      - uses: actions/setup-java@v5
+        with:
+          distribution: temurin
+          java-version: '17'
+      - uses: gradle/actions/setup-gradle@v4
+        with:
+          cache-read-only: true
+      - name: Verify source and unchanged original tests
+        env:
+          JSQL_EXPECTED_HEAD: ${{ matrix.head }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$(git rev-parse HEAD)" = "$JSQL_EXPECTED_HEAD"
+          git merge-base --is-ancestor "$JSQL_BASE_HEAD" HEAD
+          git diff --exit-code "$JSQL_BASE_HEAD" HEAD -- \
+            src/test/java/net/sf/jsqlparser/parser/CCJSqlParserUtilTest.java \
+            src/test/java/net/sf/jsqlparser/statement/lock/MySqlLockTablesTest.java \
+            build.gradle gradle.properties settings.gradle gradle
+          git diff --exit-code
+          git update-ref refs/remotes/origin/master "$JSQL_BASE_HEAD"
+      - name: Run both original test methods without changes
+        run: >-
+          ./gradlew test --no-daemon
+          --tests net.sf.jsqlparser.parser.CCJSqlParserUtilTest.testDoubleSlashLineCommentsFeature
+          --tests net.sf.jsqlparser.statement.lock.MySqlLockTablesTest.parsesAMysqldumpScript
+      - name: Print the original JUnit failure details
+        if: always()
+        shell: bash
+        run: |
+          python - <<'PY_RESULTS'
+          from pathlib import Path
+          import xml.etree.ElementTree as ET
+
+          expected = {
+              'net.sf.jsqlparser.parser.CCJSqlParserUtilTest': 'testDoubleSlashLineCommentsFeature()',
+              'net.sf.jsqlparser.statement.lock.MySqlLockTablesTest': 'parsesAMysqldumpScript()',
+          }
+          for class_name, test_name in expected.items():
+              path = Path('build/test-results/test') / ('TEST-' + class_name + '.xml')
+              if not path.is_file():
+                  raise SystemExit('Missing actual test output: ' + str(path))
+              suite = ET.parse(path).getroot()
+              cases = [case for case in suite.findall('testcase') if case.get('name') == test_name]
+              if len(cases) != 1:
+                  raise SystemExit('Expected exactly one original test: ' + class_name + '.' + test_name)
+              print('=== ' + class_name + '.' + test_name + ' ===', flush=True)
+              print(ET.tostring(cases[0], encoding='unicode'), flush=True)
+          PY_RESULTS
+          git diff --exit-code
