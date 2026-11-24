@@ -1,0 +1,53 @@
+name: Lint bubbles timer 237
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  lint:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 20
+    defaults:
+      run:
+        shell: bash
+        working-directory: head
+    steps:
+      - name: Keep LF line endings as in upstream lint
+        working-directory: .
+        run: git config --global core.autocrlf input
+      - name: Check out fixed contribution head
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          repository: wozhenbang2004/bubbles
+          ref: d0c7ebdd584ea5b7817b453b52e3e78d7fe76946
+          path: head
+          persist-credentials: false
+      - name: Install Go specified by upstream go.mod
+        uses: actions/setup-go@d8cbb8045d7f43706b9177cceb36c1f91a6644d5 # v7.1.0
+        with:
+          go-version-file: head/go.mod
+          cache: false
+      - name: Verify exact head and patch files
+        run: |
+          test "$(git rev-parse HEAD)" = d0c7ebdd584ea5b7817b453b52e3e78d7fe76946
+          python - <<'PYVERIFY'
+          import hashlib
+          import subprocess
+          expected = {'timer/timer.go': '7145ceb3d5eb7807d8c851abe64c3a7f167e1264702bb48f80b08d2fd606f3d9', 'timer/timer_accuracy_test.go': 'edde3268f3463a032326fd0066baa0a0e35ee37d0a668857624e82f4be9e830b', 'timer/timer_test.go': 'c8eca812db0f51f878a4a1e47fb709d7021beb9e46dce14057554e962815e8d0'}
+          for name, digest in expected.items():
+              actual = hashlib.sha256(subprocess.check_output(['git', 'show', f'HEAD:{name}'])).hexdigest()
+              print(name, actual)
+              assert actual == digest
+          PYVERIFY
+          go version
+      - name: Lint with upstream version and configuration
+        run: |
+          go install github.com/golangci/golangci-lint/v2/cmd/golangci-lint@v2.13.1
+          golangci-lint run --timeout 10m
