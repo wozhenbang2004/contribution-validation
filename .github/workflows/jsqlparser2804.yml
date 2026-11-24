@@ -1,0 +1,267 @@
+name: JSqlParser 2804 validation
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+env:
+  JSQL_BASE_HEAD: 247e31c557271515d074d23a5f5d11bde6e7f3c1
+  JSQL_CANDIDATE_HEAD: 9997aa674cd7c20bfe1f6c9250951cc5e44fdda1
+
+jobs:
+  validate:
+    runs-on: ubuntu-latest
+    timeout-minutes: 50
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          repository: wozhenbang2004/JSqlParser
+          ref: 9997aa674cd7c20bfe1f6c9250951cc5e44fdda1
+          path: source
+          fetch-depth: 0
+          persist-credentials: false
+      - uses: actions/setup-java@v5
+        with:
+          distribution: temurin
+          java-version: '17'
+      - uses: actions/setup-python@v6
+        with:
+          python-version: '3.12'
+      - uses: gradle/actions/setup-gradle@v4
+        with:
+          cache-read-only: true
+      - name: Verify fixed source and four-file scope
+        working-directory: source
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$(git rev-parse HEAD)" = "$JSQL_CANDIDATE_HEAD"
+          git merge-base --is-ancestor "$JSQL_BASE_HEAD" HEAD
+          python - <<'PY_SCOPE'
+          import os, subprocess
+          expected = {
+              'src/main/java/net/sf/jsqlparser/expression/operators/arithmetic/IntegerDivision.java',
+              'src/main/java/net/sf/jsqlparser/util/deparser/ExpressionDeParser.java',
+              'src/main/jjtree/net/sf/jsqlparser/parser/JSqlParserCC.jjt',
+              'src/test/java/net/sf/jsqlparser/statement/select/DuckDBTest.java',
+          }
+          actual = set(subprocess.check_output(
+              ['git', 'diff', '--name-only', os.environ['JSQL_BASE_HEAD'], 'HEAD'], text=True
+          ).splitlines())
+          assert actual == expected, (actual, expected)
+          PY_SCOPE
+          git diff --check "$JSQL_BASE_HEAD" HEAD
+          git diff --exit-code
+          # Spotless compares changed files to the fixed upstream baseline.
+          git update-ref refs/remotes/origin/master "$JSQL_BASE_HEAD"
+          git worktree add --detach "$RUNNER_TEMP/jsqlparser-2804-base" "$JSQL_BASE_HEAD"
+      - name: Prepare unchanged consumer for both versions
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p "$RUNNER_TEMP/jsqlparser-2804-consumer"
+          cat > "$RUNNER_TEMP/jsqlparser-2804-consumer/DuckDbRoundTrip.java" <<'JAVA_CONSUMER'
+          import java.nio.charset.StandardCharsets;
+          import java.util.Base64;
+          import net.sf.jsqlparser.JSQLParserException;
+          import net.sf.jsqlparser.expression.LongValue;
+          import net.sf.jsqlparser.expression.operators.arithmetic.IntegerDivision;
+          import net.sf.jsqlparser.parser.CCJSqlParserUtil;
+          import net.sf.jsqlparser.statement.Statement;
+          import net.sf.jsqlparser.util.deparser.ExpressionDeParser;
+          import net.sf.jsqlparser.util.deparser.StatementDeParser;
+
+          public class DuckDbRoundTrip {
+              private static String encode(String value) {
+                  return Base64.getEncoder().encodeToString(value.getBytes(StandardCharsets.UTF_8));
+              }
+
+              public static void main(String[] args) throws Exception {
+                  for (IntegerDivision division : new IntegerDivision[] {
+                          new IntegerDivision().withLeftExpression(new LongValue(7))
+                                  .withRightExpression(new LongValue(2)),
+                          new IntegerDivision(new LongValue(7), new LongValue(2)),
+                          (IntegerDivision) CCJSqlParserUtil.parseExpression("7 DIV 2", false)}) {
+                      division.setRightExpression(new LongValue(3));
+                      StringBuilder builder = new StringBuilder();
+                      division.accept(new ExpressionDeParser(null, builder), null);
+                      if (!"7 DIV 3".equals(division.toString()) || !"7 DIV 3".equals(builder.toString())) {
+                          throw new AssertionError("DIV construction or rewriting changed");
+                      }
+                  }
+                  System.err.println("PASS DIV constructors and rewritten expression in both renderers");
+                  boolean failed = false;
+                  for (String sql : args) {
+                      try {
+                          Statement statement = CCJSqlParserUtil.parse(sql);
+                          StringBuilder builder = new StringBuilder();
+                          statement.accept(new StatementDeParser(builder));
+                          System.out.println("OK\t" + encode(sql) + "\t" + encode(statement.toString())
+                                  + "\t" + encode(builder.toString()));
+                      } catch (JSQLParserException error) {
+                          failed = true;
+                          System.out.println("ERROR\t" + encode(sql) + "\t" + encode(error.toString()));
+                      }
+                  }
+                  if (failed) {
+                      System.exit(1);
+                  }
+              }
+          }
+          JAVA_CONSUMER
+          cat > "$RUNNER_TEMP/jsqlparser-2804-consumer/native_consumer.py" <<'PY_CONSUMER'
+          import argparse
+          import base64
+          import json
+          import subprocess
+
+          import duckdb
+
+
+          CASES = [
+              ("SELECT 7 // 2", [(3,)], True),
+              ("SELECT 7//2", [(3,)], True),
+              ("SELECT -7 // 2, 7 // -2, 7.0 // 2", [(-3, -3, 3.5)], True),
+              ("SELECT 2 * 9 // 4, 20 // 3 // 2, 1 + 7 // 2 * 3", [(4, 3, 10)], True),
+              ("SELECT 7 //*x*/ 2", [(3.5,)], False),
+              ("SELECT 7 // /*x*/ 2", [(3,)], True),
+              (
+                  "SELECT amount // bucket AS quotient FROM samples ORDER BY amount",
+                  [(-3,), (3,), (2,)],
+                  True,
+              ),
+              ("SELECT 7 / 2", [(3.5,)], False),
+          ]
+          INVALID = ["SELECT 7 / / 2", "SELECT 7 /\n/ 2", "SELECT 7 / /*x*/ / 2"]
+
+
+          def execute(connection, sql):
+              result = connection.execute(sql)
+              return result.fetchall(), [str(column[1]) for column in result.description]
+
+
+          def main():
+              parser = argparse.ArgumentParser()
+              parser.add_argument("--classpath")
+              parser.add_argument("--mode", choices=["native", "baseline", "fixed"], default="native")
+              args = parser.parse_args()
+              if args.mode != "native" and not args.classpath:
+                  parser.error("--classpath is required for parser validation")
+
+              assert duckdb.__version__ == "1.5.6", duckdb.__version__
+              records = []
+              with duckdb.connect() as connection:
+                  connection.execute("CREATE TABLE samples (amount INTEGER, bucket INTEGER)")
+                  connection.execute("INSERT INTO samples VALUES (7, 2), (-7, 2), (10, 4)")
+                  for sql, expected, unsupported_before in CASES:
+                      rows, types = execute(connection, sql)
+                      assert rows == expected, (sql, rows, expected)
+                      records.append({"sql": sql, "rows": rows, "types": types})
+                  for sql in INVALID:
+                      try:
+                          connection.execute(sql)
+                      except duckdb.ParserException:
+                          continue
+                      raise AssertionError(f"DuckDB unexpectedly accepted {sql!r}")
+
+                  if args.mode != "native":
+                      queries = [case[0] for case in CASES] + INVALID
+                      process = subprocess.run(
+                          ["java", "-cp", args.classpath, "DuckDbRoundTrip", *queries],
+                          text=True,
+                          capture_output=True,
+                          check=False,
+                      )
+                      print(process.stderr, end="")
+                      # Both runs include invalid SQL, so the Java consumer must report a parser failure.
+                      assert process.returncode == 1, (process.returncode, process.stdout, process.stderr)
+                      lines = process.stdout.splitlines()
+                      assert len(lines) == len(queries), (lines, process.stderr)
+                      for index, (sql, line) in enumerate(zip(queries, lines)):
+                          fields = line.split("\t")
+                          decoded = [base64.b64decode(value).decode("utf-8") for value in fields[1:]]
+                          assert decoded[0] == sql, (decoded, sql)
+                          must_fail = index >= len(CASES) or (
+                              args.mode == "baseline" and CASES[index][2]
+                          )
+                          if must_fail:
+                              assert fields[0] == "ERROR", (sql, fields)
+                              assert "net.sf.jsqlparser.JSQLParserException" in decoded[1], decoded[1]
+                              if index < len(CASES):
+                                  records[index]["parser_error"] = decoded[1]
+                              continue
+                          assert fields[0] == "OK" and len(decoded) == 3, (sql, fields)
+                          records[index]["to_string"] = decoded[1]
+                          records[index]["deparser"] = decoded[2]
+                          for rendered in decoded[1:]:
+                              rows, types = execute(connection, rendered)
+                              assert rows == CASES[index][1], (sql, rendered, rows)
+                              assert types == records[index]["types"], (sql, rendered, types)
+
+              print(json.dumps({"duckdb": duckdb.__version__, "mode": args.mode, "cases": records}, indent=2))
+              print(f"PASS {args.mode}: native values, types and SQL boundaries")
+
+
+          if __name__ == "__main__":
+              main()
+          PY_CONSUMER
+      - name: Install DuckDB for the SQL consumer
+        run: |
+          python -m pip install --index-url https://pypi.org/simple --only-binary=:all: duckdb==1.5.6
+      - name: Reproduce both new tests against unchanged baseline production code
+        shell: bash
+        run: |
+          set -euo pipefail
+          cp source/src/test/java/net/sf/jsqlparser/statement/select/DuckDBTest.java "$RUNNER_TEMP/jsqlparser-2804-base/src/test/java/net/sf/jsqlparser/statement/select/DuckDBTest.java"
+          cd "$RUNNER_TEMP/jsqlparser-2804-base"
+          test "$(git diff --name-only)" = 'src/test/java/net/sf/jsqlparser/statement/select/DuckDBTest.java'
+          set +e
+          ./gradlew test --tests 'net.sf.jsqlparser.statement.select.DuckDBTest.testIntegerDivision*' --no-daemon
+          test_status=$?
+          set -e
+          test "$test_status" -ne 0
+          python - <<'PY_BASELINE'
+          import xml.etree.ElementTree as ET
+          suite = ET.parse('build/test-results/test/TEST-net.sf.jsqlparser.statement.select.DuckDBTest.xml').getroot()
+          expected = {'testIntegerDivisionOperator()', 'testIntegerDivisionCommentBoundaries()'}
+          cases = suite.findall('testcase')
+          assert {case.attrib['name'] for case in cases} == expected
+          assert int(suite.attrib['failures']) == 2 and int(suite.attrib['errors']) == 0
+          for case in cases:
+              failure = case.find('failure')
+              assert failure is not None
+              assert 'JSQLParserException' in failure.attrib.get('type', '')
+          print('PASS baseline: both new tests fail with parser exceptions, no build failure accepted')
+          PY_BASELINE
+      - name: Run the same native consumer against baseline
+        shell: bash
+        run: |
+          set -euo pipefail
+          javac -cp "$RUNNER_TEMP/jsqlparser-2804-base/build/classes/java/main" -d "$RUNNER_TEMP/jsqlparser-2804-consumer" "$RUNNER_TEMP/jsqlparser-2804-consumer/DuckDbRoundTrip.java"
+          python "$RUNNER_TEMP/jsqlparser-2804-consumer/native_consumer.py" --mode baseline --classpath "$RUNNER_TEMP/jsqlparser-2804-consumer:$RUNNER_TEMP/jsqlparser-2804-base/build/classes/java/main:$RUNNER_TEMP/jsqlparser-2804-base/build/resources/main"
+      - name: Baseline project benchmark
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd "$RUNNER_TEMP/jsqlparser-2804-base"
+          ./gradlew jmh --no-daemon
+      - name: Complete project checks on fixed head
+        working-directory: source
+        run: ./gradlew check --no-daemon
+      - name: Run the same native consumer against fixed head
+        shell: bash
+        run: |
+          set -euo pipefail
+          python "$RUNNER_TEMP/jsqlparser-2804-consumer/native_consumer.py" --mode fixed --classpath "$RUNNER_TEMP/jsqlparser-2804-consumer:$GITHUB_WORKSPACE/source/build/classes/java/main:$GITHUB_WORKSPACE/source/build/resources/main"
+      - name: Fixed-head project benchmark
+        working-directory: source
+        run: ./gradlew jmh --no-daemon
+      - name: Verify candidate files were not modified
+        working-directory: source
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$(git rev-parse HEAD)" = "$JSQL_CANDIDATE_HEAD"
+          git diff --exit-code
