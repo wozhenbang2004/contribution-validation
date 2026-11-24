@@ -1,0 +1,408 @@
+name: Validate go-redis metadata 4097
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    defaults:
+      run:
+        shell: bash
+        working-directory: head
+    env:
+      REDIS_ADDR: 127.0.0.1:6379
+      REDIS_CLUSTER_ADDRS: 127.0.0.1:16600,127.0.0.1:16601,127.0.0.1:16602,127.0.0.1:16603,127.0.0.1:16604,127.0.0.1:16605
+      CLIENT_LIBS_TEST_IMAGE: redislabs/client-libs-test:8.12.0
+      RCE_DOCKER: 'true'
+      RE_CLUSTER: 'false'
+    steps:
+      - name: Check out fixed contribution head
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          repository: wozhenbang2004/go-redis
+          ref: 97c88e7c205761709b65fe79ae6aad710aec37bc
+          path: head
+          fetch-depth: 2
+          persist-credentials: false
+      - name: Check out unchanged upstream base
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          repository: redis/go-redis
+          ref: d7bfd863973f522e3d1646dc623a643234bacf95
+          path: base
+          persist-credentials: false
+      - name: Install supported Go
+        uses: actions/setup-go@d8cbb8045d7f43706b9177cceb36c1f91a6644d5 # v7.1.0
+        with:
+          go-version: '1.26.11'
+          cache: false
+      - name: Verify fixed identities and exactly three changed files
+        run: |
+          python - <<'PYVERIFY'
+          import hashlib
+          import subprocess
+          from pathlib import Path
+          base = 'd7bfd863973f522e3d1646dc623a643234bacf95'
+          assert subprocess.check_output(['git', 'rev-parse', 'HEAD'], text=True).strip() == '97c88e7c205761709b65fe79ae6aad710aec37bc'
+          assert subprocess.check_output(['git', 'rev-parse', 'HEAD^'], text=True).strip() == base
+          assert subprocess.check_output(['git', '-C', '../base', 'rev-parse', 'HEAD'], text=True).strip() == base
+          expected = {'redis.go': '615c0530b5e403a6b6d517dce0761f15f20abdfed78b128712dd7f1a12906d5b', 'csc_integration.go': 'e070a960fd824dd1001e56c757a79f473ae71624ecaa6c213c8bc9a5cb35f1ae', 'command_metadata_test.go': 'aa414cbf447aacbeed586b73590da397095e6d586a917c8efc7d1c3434c4b8bc'}
+          changed = set(subprocess.check_output(['git', 'diff', '--name-only', base, 'HEAD'], text=True).splitlines())
+          assert changed == set(expected), changed
+          for name, digest in expected.items():
+              blob = subprocess.check_output(['git', 'show', f'HEAD:{name}'])
+              actual = hashlib.sha256(blob).hexdigest()
+              print(name, actual)
+              assert actual == digest
+              assert Path(name).read_bytes() == blob
+          PYVERIFY
+          go version
+          go mod download
+          git diff --stat d7bfd863973f522e3d1646dc623a643234bacf95 HEAD
+      - name: Build and vet root module
+        run: |
+          go build ./...
+          go vet ./...
+      - name: Start only the upstream standalone and cluster services
+        run: |
+          docker compose up -d redis osscluster
+          docker image inspect "$CLIENT_LIBS_TEST_IMAGE" --format '{{json .RepoDigests}}'
+          for attempt in {1..60}; do
+            if docker compose exec -T redis redis-cli -p 6379 ping | grep -qx PONG &&
+               docker compose exec -T osscluster redis-cli -p 16605 ping | grep -qx PONG; then
+              break
+            fi
+            sleep 1
+          done
+          docker compose exec -T redis redis-cli -p 6379 ping | grep -qx PONG
+          docker compose exec -T osscluster redis-cli -p 16605 ping | grep -qx PONG
+          cluster_info=$(docker compose exec -T osscluster redis-cli -p 16600 cluster info | tr -d '\r')
+          if grep -qx 'cluster_slots_assigned:0' <<< "$cluster_info"; then
+            docker compose exec -T osscluster redis-cli --cluster create \
+              127.0.0.1:16600 127.0.0.1:16601 127.0.0.1:16602 \
+              127.0.0.1:16603 127.0.0.1:16604 127.0.0.1:16605 \
+              --cluster-replicas 1 --cluster-yes
+          fi
+          for attempt in {1..60}; do
+            if docker compose exec -T osscluster redis-cli -p 16600 cluster info | tr -d '\r' | grep -qx 'cluster_state:ok'; then
+              break
+            fi
+            sleep 1
+          done
+          docker compose exec -T osscluster redis-cli -p 16600 cluster info | tr -d '\r' | tee ../cluster-info.txt
+          grep -qx 'cluster_state:ok' ../cluster-info.txt
+          grep -qx 'cluster_slots_assigned:16384' ../cluster-info.txt
+          grep -qx 'cluster_known_nodes:6' ../cluster-info.txt
+      - name: Prepare identical public consumer and regression test
+        run: |
+          mkdir -p ../validation
+          cp command_metadata_test.go ../base/command_metadata_test.go
+          cat > ../validation/metadata-consumer.go <<'GOFILE'
+          package main
+          
+          import (
+          	"context"
+          	"fmt"
+          	"os"
+          	"strconv"
+          	"strings"
+          	"time"
+          
+          	"github.com/redis/go-redis/v9"
+          )
+          
+          func commandCalls(ctx context.Context, client *redis.Client, command string) int64 {
+          	info, err := client.Info(ctx, "commandstats").Result()
+          	must(err)
+          	for _, line := range strings.Split(info, "\n") {
+          		rest, ok := strings.CutPrefix(strings.TrimSpace(line), "cmdstat_"+command+":")
+          		if !ok {
+          			continue
+          		}
+          		for _, field := range strings.Split(rest, ",") {
+          			if count, ok := strings.CutPrefix(field, "calls="); ok {
+          				n, err := strconv.ParseInt(count, 10, 64)
+          				must(err)
+          				return n
+          			}
+          		}
+          		panic("commandstats entry has no calls field")
+          	}
+          	return 0
+          }
+          
+          func must(err error) {
+          	if err != nil {
+          		panic(err)
+          	}
+          }
+          
+          func runUncached(ctx context.Context, admin *redis.Client, addr, name string, configure func(*redis.Options)) bool {
+          	before := commandCalls(ctx, admin, "command")
+          	helloBefore := commandCalls(ctx, admin, "hello")
+          	opt := &redis.Options{
+          		Addr:     addr,
+          		Protocol: 3,
+          		PoolSize: 1,
+          		CommandMetadata: &redis.CommandMetadataConfig{
+          			Mode:            redis.CommandMetadataPreferLive,
+          			RefreshInterval: 30 * time.Millisecond,
+          		},
+          	}
+          	configure(opt)
+          	client := redis.NewClient(opt)
+          	operations := 0
+          	func() {
+          		defer client.Close()
+          		key := "metadata4097:" + name
+          		must(client.Ping(ctx).Err())
+          		defer client.Del(ctx, key)
+          		deadline := time.Now().Add(time.Second)
+          		for time.Now().Before(deadline) {
+          			want := strconv.Itoa(operations)
+          			must(client.Set(ctx, key, want, 0).Err())
+          			got, err := client.Get(ctx, key).Result()
+          			must(err)
+          			if got != want {
+          				panic(fmt.Sprintf("%s: GET=%q, want %q", name, got, want))
+          			}
+          			operations++
+          			time.Sleep(25 * time.Millisecond)
+          		}
+          	}()
+          	// Close joins the client's metadata worker before the final server counters.
+          	delta := commandCalls(ctx, admin, "command") - before
+          	helloDelta := commandCalls(ctx, admin, "hello") - helloBefore
+          	fmt.Printf("UNCACHED case=%s command_delta=%d hello_delta=%d set_get_pairs=%d values=ok\n", name, delta, helloDelta, operations)
+          	if delta != 0 {
+          		fmt.Printf("UNCACHED_FAILURE %s: unexpected live metadata requests\n", name)
+          		return false
+          	}
+          	return true
+          }
+          
+          func runCached(ctx context.Context, admin *redis.Client, addr, name string, useConfig bool) {
+          	before := commandCalls(ctx, admin, "command")
+          	opt := &redis.Options{
+          		Addr:            addr,
+          		Protocol:        3,
+          		PoolSize:        1,
+          		CommandMetadata: &redis.CommandMetadataConfig{Mode: redis.CommandMetadataPreferLive},
+          	}
+          	if useConfig {
+          		opt.ClientSideCacheConfig = &redis.CacheConfig{MaxEntries: 32}
+          	} else {
+          		opt.ClientSideCache = redis.NewLocalCache(redis.CacheConfig{MaxEntries: 32})
+          	}
+          	client := redis.NewClient(opt)
+          	defer client.Close()
+          	key := "metadata4097:" + name
+          	must(admin.Set(ctx, key, "before", 0).Err())
+          	defer admin.Del(ctx, key)
+          	must(client.Ping(ctx).Err())
+          
+          	cached := false
+          	deadline := time.Now().Add(5 * time.Second)
+          	for time.Now().Before(deadline) {
+          		got, err := client.Get(ctx, key).Result()
+          		must(err)
+          		if got != "before" {
+          			panic("cache warmup returned the wrong value")
+          		}
+          		if commandCalls(ctx, admin, "command") > before {
+          			getBefore := commandCalls(ctx, admin, "get")
+          			for i := 0; i < 10; i++ {
+          				got, err := client.Get(ctx, key).Result()
+          				must(err)
+          				if got != "before" {
+          					panic("cache hit returned the wrong value")
+          				}
+          			}
+          			if commandCalls(ctx, admin, "get") == getBefore {
+          				cached = true
+          				break
+          			}
+          		}
+          		time.Sleep(10 * time.Millisecond)
+          	}
+          	if !cached {
+          		panic("enabled CSC did not fetch live metadata and serve ten cache hits")
+          	}
+          	must(admin.Set(ctx, key, "after", 0).Err())
+          	fresh := false
+          	deadline = time.Now().Add(5 * time.Second)
+          	for time.Now().Before(deadline) {
+          		got, err := client.Get(ctx, key).Result()
+          		must(err)
+          		if got == "after" {
+          			fresh = true
+          			break
+          		}
+          		time.Sleep(10 * time.Millisecond)
+          	}
+          	if !fresh {
+          		panic("CSC did not apply the real server invalidation")
+          	}
+          	fmt.Printf("CSC_OK case=%s command_delta=%d ten_hits_server_gets=0 invalidated_value=after\n", name, commandCalls(ctx, admin, "command")-before)
+          }
+          
+          func runCluster(ctx context.Context, addrs []string) {
+          	if len(addrs) != 6 {
+          		panic("REDIS_CLUSTER_ADDRS must identify the six real cluster nodes")
+          	}
+          	observers := make([]*redis.Client, 0, len(addrs))
+          	for _, addr := range addrs {
+          		client := redis.NewClient(&redis.Options{Addr: addr})
+          		defer client.Close()
+          		must(client.Ping(ctx).Err())
+          		observers = append(observers, client)
+          	}
+          	var before int64
+          	for _, client := range observers {
+          		before += commandCalls(ctx, client, "command")
+          	}
+          	cluster := redis.NewClusterClient(&redis.ClusterOptions{
+          		Addrs:           addrs,
+          		Protocol:        3,
+          		CommandMetadata: &redis.CommandMetadataConfig{Mode: redis.CommandMetadataPreferLive},
+          	})
+          	defer cluster.Close()
+          	cluster.SetCommandInfoResolver(cluster.NewDynamicResolver())
+          	keys := []string{"metadata4097:{alpha}:a", "metadata4097:{bravo}:b"}
+          	for i, key := range keys {
+          		must(cluster.Set(ctx, key, strconv.Itoa(i+1), 0).Err())
+          		defer cluster.Del(ctx, key)
+          	}
+          	slotA, err := cluster.ClusterKeySlot(ctx, keys[0]).Result()
+          	must(err)
+          	slotB, err := cluster.ClusterKeySlot(ctx, keys[1]).Result()
+          	must(err)
+          	if slotA == slotB {
+          		panic("cluster control keys unexpectedly share a slot")
+          	}
+          	got, err := cluster.MGet(ctx, keys...).Result()
+          	must(err)
+          	if len(got) != 2 || got[0] != "1" || got[1] != "2" {
+          		panic(fmt.Sprintf("cross-slot MGET=%v, want [1 2]", got))
+          	}
+          	var after int64
+          	for _, client := range observers {
+          		after += commandCalls(ctx, client, "command")
+          	}
+          	if after <= before {
+          		panic("uncached cluster did not load live routing metadata")
+          	}
+          	fmt.Printf("CLUSTER_OK cache=off command_delta=%d slots=%d,%d mget=%v\n", after-before, slotA, slotB, got)
+          }
+          
+          func main() {
+          	ctx, cancel := context.WithTimeout(context.Background(), 45*time.Second)
+          	defer cancel()
+          	addr := os.Getenv("REDIS_ADDR")
+          	if addr == "" {
+          		panic("REDIS_ADDR must identify the dedicated real Redis service")
+          	}
+          	admin := redis.NewClient(&redis.Options{Addr: addr})
+          	defer admin.Close()
+          	must(admin.Ping(ctx).Err())
+          	info, err := admin.Info(ctx, "server").Result()
+          	must(err)
+          	for _, line := range strings.Split(info, "\n") {
+          		if strings.HasPrefix(line, "redis_version:") {
+          			fmt.Println(strings.TrimSpace(line))
+          		}
+          	}
+          	failures := 0
+          	for _, tc := range []struct {
+          		name      string
+          		configure func(*redis.Options)
+          	}{
+          		{"no-cache", func(*redis.Options) {}},
+          		{"resp2", func(opt *redis.Options) {
+          			opt.Protocol = 2
+          			opt.ClientSideCacheConfig = &redis.CacheConfig{MaxEntries: 8}
+          		}},
+          		{"nonzero-db", func(opt *redis.Options) {
+          			opt.DB = 1
+          			opt.ClientSideCacheConfig = &redis.CacheConfig{MaxEntries: 8}
+          		}},
+          		{"credential-provider", func(opt *redis.Options) {
+          			opt.CredentialsProvider = func() (string, string) { return "", "" }
+          			opt.ClientSideCacheConfig = &redis.CacheConfig{MaxEntries: 8}
+          		}},
+          		{"static-default", func(opt *redis.Options) {
+          			opt.CommandMetadata.Mode = redis.CommandMetadataStatic
+          		}},
+          	} {
+          		if !runUncached(ctx, admin, addr, tc.name, tc.configure) {
+          			failures++
+          		}
+          	}
+          	runCached(ctx, admin, addr, "explicit-cache", false)
+          	runCached(ctx, admin, addr, "cache-config", true)
+          	runCluster(ctx, strings.Split(os.Getenv("REDIS_CLUSTER_ADDRS"), ","))
+          	fmt.Printf("METADATA_CHECK failures=%d\n", failures)
+          	if failures != 0 {
+          		os.Exit(1)
+          	}
+          }
+          GOFILE
+      - name: Confirm baseline fails the four uncached metadata cases
+        working-directory: base
+        run: |
+          set +e
+          go test -count=1 -v . -run '^TestCommandMetadataWithoutCSC$' > ../baseline-tests.txt 2>&1
+          test_status=$?
+          set -e
+          cat ../baseline-tests.txt
+          test "$test_status" -eq 1
+          test "$(grep -Fc 'uncached client owns an unused metadata store' ../baseline-tests.txt)" -eq 4
+          set +e
+          go run ../validation/metadata-consumer.go > ../baseline-consumer.txt 2>&1
+          consumer_status=$?
+          set -e
+          cat ../baseline-consumer.txt
+          test "$consumer_status" -eq 1
+          grep -qx 'METADATA_CHECK failures=4' ../baseline-consumer.txt
+          test "$(grep -c '^UNCACHED_FAILURE ' ../baseline-consumer.txt)" -eq 4
+          test "$(grep -c '^CSC_OK ' ../baseline-consumer.txt)" -eq 2
+          grep -q '^CLUSTER_OK ' ../baseline-consumer.txt
+      - name: Run final metadata regressions and related tests with race detection
+        run: go test -race -count=1 -v . -run '^(TestCommandMetadata|TestCluster.*Metadata|TestCSC.*Metadata)' -timeout 5m
+      - name: Confirm public consumer on the final head
+        run: |
+          go run ../validation/metadata-consumer.go | tee ../head-consumer.txt
+          grep -qx 'METADATA_CHECK failures=0' ../head-consumer.txt
+          test "$(grep -c '^CSC_OK ' ../head-consumer.txt)" -eq 2
+          grep -q '^CLUSTER_OK ' ../head-consumer.txt
+      - name: Run the upstream real CSC and cluster suite
+        run: |
+          CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go test -c -o "$RUNNER_TEMP/csc-cluster.test" .
+          docker run --rm --platform linux/amd64 --network none \
+            -e GOREDIS_CSC_LIVE=1 \
+            --mount "type=bind,source=$RUNNER_TEMP/csc-cluster.test,target=/csc-cluster.test,readonly" \
+            --entrypoint /csc-cluster.test "$CLIENT_LIBS_TEST_IMAGE" \
+            -test.run '^(TestClusterCSCLive|TestCSCPolicy(Fanout)?Live)' -test.v -test.timeout=3m
+      - name: Check formatting of the changed Go files
+        run: |
+          mkdir -p "$RUNNER_TEMP/format-tools"
+          GOBIN="$RUNNER_TEMP/format-tools" GOTOOLCHAIN=local go install mvdan.cc/gofumpt@v0.12.0
+          GOBIN="$RUNNER_TEMP/format-tools" GOTOOLCHAIN=local go install golang.org/x/tools/cmd/goimports@v0.52.0
+          go version -m "$RUNNER_TEMP/format-tools/gofumpt" "$RUNNER_TEMP/format-tools/goimports"
+          gofmt -d redis.go csc_integration.go command_metadata_test.go | tee ../gofmt.diff
+          "$RUNNER_TEMP/format-tools/gofumpt" -d redis.go csc_integration.go command_metadata_test.go | tee ../gofumpt.diff
+          "$RUNNER_TEMP/format-tools/goimports" -local github.com/redis/go-redis -d redis.go csc_integration.go command_metadata_test.go | tee ../goimports.diff
+          test ! -s ../gofmt.diff
+          test ! -s ../gofumpt.diff
+          test ! -s ../goimports.diff
+      - name: Show service logs on failure
+        if: failure()
+        run: docker compose logs --no-color redis osscluster
+      - name: Stop this job's services
+        if: always()
+        run: docker compose stop redis osscluster
