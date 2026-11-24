@@ -36,11 +36,11 @@ jobs:
         run: |
           test "$(git rev-parse HEAD)" = d0c7ebdd584ea5b7817b453b52e3e78d7fe76946
           python - <<'PYVERIFY'
-          from pathlib import Path
           import hashlib
+          import subprocess
           expected = {'timer/timer.go': '7145ceb3d5eb7807d8c851abe64c3a7f167e1264702bb48f80b08d2fd606f3d9', 'timer/timer_accuracy_test.go': 'edde3268f3463a032326fd0066baa0a0e35ee37d0a668857624e82f4be9e830b', 'timer/timer_test.go': 'c8eca812db0f51f878a4a1e47fb709d7021beb9e46dce14057554e962815e8d0'}
           for name, digest in expected.items():
-              actual = hashlib.sha256(Path(name).read_bytes()).hexdigest()
+              actual = hashlib.sha256(subprocess.check_output(['git', 'show', f'HEAD:{name}'])).hexdigest()
               print(name, actual)
               assert actual == digest
           PYVERIFY
@@ -51,8 +51,6 @@ jobs:
         run: go build -v ./...
       - name: Test
         run: go test -count=1 ./...
-      - name: Check Go formatting
-        run: test -z "$(gofmt -l timer/timer.go timer/timer_test.go timer/timer_accuracy_test.go)"
       - name: Check out unchanged upstream base
         if: matrix.os == 'ubuntu-latest' && matrix.go == '1.27.x'
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -64,6 +62,8 @@ jobs:
       - name: Prepare identical consumer and regression cases
         if: matrix.os == 'ubuntu-latest' && matrix.go == '1.27.x'
         run: |
+          gofmt -d ../base/timer/timer.go ../base/timer/timer_test.go
+          gofmt -d timer/timer.go timer/timer_test.go timer/timer_accuracy_test.go
           mkdir -p ../validation
           cp timer/timer_accuracy_test.go ../base/timer/
           cat > ../validation/timer-consumer.go <<'GOFILE'
@@ -186,3 +186,7 @@ jobs:
         run: |
           go install github.com/golangci/golangci-lint/v2/cmd/golangci-lint@v2.13.1
           golangci-lint run --timeout 10m
+      - name: Check Go formatting
+        run: |
+          gofmt -d timer/timer.go timer/timer_test.go timer/timer_accuracy_test.go
+          test -z "$(gofmt -l timer/timer.go timer/timer_test.go timer/timer_accuracy_test.go)"
