@@ -25,9 +25,9 @@ jobs:
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           repository: wozhenbang2004/go-redis
-          ref: 97c88e7c205761709b65fe79ae6aad710aec37bc
+          ref: faff0ebe0ac8bda6d4f0846ac96818b9d43b7439
           path: head
-          fetch-depth: 2
+          fetch-depth: 4
           persist-credentials: false
       - name: Check out unchanged upstream base
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -41,17 +41,21 @@ jobs:
         with:
           go-version: '1.26.11'
           cache: false
-      - name: Verify fixed identities and exactly three changed files
+      - name: Verify fixed identities and exactly four changed files
         run: |
           python - <<'PYVERIFY'
           import hashlib
           import subprocess
           from pathlib import Path
           base = 'd7bfd863973f522e3d1646dc623a643234bacf95'
-          assert subprocess.check_output(['git', 'rev-parse', 'HEAD'], text=True).strip() == '97c88e7c205761709b65fe79ae6aad710aec37bc'
-          assert subprocess.check_output(['git', 'rev-parse', 'HEAD^'], text=True).strip() == base
+          assert subprocess.check_output(['git', 'rev-parse', 'HEAD'], text=True).strip() == 'faff0ebe0ac8bda6d4f0846ac96818b9d43b7439'
+          assert subprocess.check_output(['git', 'rev-parse', 'HEAD^'], text=True).strip() == '9c9de4d564f15f3c3281966324be1d5d3a6a547c'
+          assert subprocess.check_output(['git', 'rev-parse', 'HEAD^^'], text=True).strip() == '97c88e7c205761709b65fe79ae6aad710aec37bc'
+          assert subprocess.check_output(['git', 'rev-parse', 'HEAD^^^'], text=True).strip() == base
           assert subprocess.check_output(['git', '-C', '../base', 'rev-parse', 'HEAD'], text=True).strip() == base
-          expected = {'redis.go': '615c0530b5e403a6b6d517dce0761f15f20abdfed78b128712dd7f1a12906d5b', 'csc_integration.go': 'e070a960fd824dd1001e56c757a79f473ae71624ecaa6c213c8bc9a5cb35f1ae', 'command_metadata_test.go': 'aa414cbf447aacbeed586b73590da397095e6d586a917c8efc7d1c3434c4b8bc'}
+          base_csc = subprocess.check_output(['git', '-C', '../base', 'show', f'{base}:csc_test.go'])
+          assert hashlib.sha256(base_csc).hexdigest() == '29a586eacac9d123c94527892185fb3d39f5434f74727237ed8eb8ea367438a3'
+          expected = {'redis.go': '615c0530b5e403a6b6d517dce0761f15f20abdfed78b128712dd7f1a12906d5b', 'csc_integration.go': 'e070a960fd824dd1001e56c757a79f473ae71624ecaa6c213c8bc9a5cb35f1ae', 'command_metadata_test.go': 'aa414cbf447aacbeed586b73590da397095e6d586a917c8efc7d1c3434c4b8bc', 'csc_test.go': 'a06f2dd459979916676b1b2391cc3c22fc2bfd61727117b553e64f43a6fb30c1'}
           changed = set(subprocess.check_output(['git', 'diff', '--name-only', base, 'HEAD'], text=True).splitlines())
           assert changed == set(expected), changed
           for name, digest in expected.items():
@@ -394,9 +398,9 @@ jobs:
           GOBIN="$RUNNER_TEMP/format-tools" GOTOOLCHAIN=local go install mvdan.cc/gofumpt@v0.12.0
           GOBIN="$RUNNER_TEMP/format-tools" GOTOOLCHAIN=local go install golang.org/x/tools/cmd/goimports@v0.52.0
           go version -m "$RUNNER_TEMP/format-tools/gofumpt" "$RUNNER_TEMP/format-tools/goimports"
-          gofmt -d redis.go csc_integration.go command_metadata_test.go | tee ../gofmt.diff
-          "$RUNNER_TEMP/format-tools/gofumpt" -d redis.go csc_integration.go command_metadata_test.go | tee ../gofumpt.diff
-          "$RUNNER_TEMP/format-tools/goimports" -local github.com/redis/go-redis -d redis.go csc_integration.go command_metadata_test.go | tee ../goimports.diff
+          gofmt -d redis.go csc_integration.go command_metadata_test.go csc_test.go | tee ../gofmt.diff
+          "$RUNNER_TEMP/format-tools/gofumpt" -d redis.go csc_integration.go command_metadata_test.go csc_test.go | tee ../gofumpt.diff
+          "$RUNNER_TEMP/format-tools/goimports" -local github.com/redis/go-redis -d redis.go csc_integration.go command_metadata_test.go csc_test.go | tee ../goimports.diff
           test ! -s ../gofmt.diff
           test ! -s ../gofumpt.diff
           test ! -s ../goimports.diff
