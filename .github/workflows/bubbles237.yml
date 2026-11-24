@@ -1,0 +1,188 @@
+name: Validate bubbles timer 237
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  verify:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+        go: ['1.26.x', '1.27.x']
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 20
+    defaults:
+      run:
+        shell: bash
+        working-directory: head
+    steps:
+      - name: Check out fixed contribution head
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          repository: wozhenbang2004/bubbles
+          ref: d0c7ebdd584ea5b7817b453b52e3e78d7fe76946
+          path: head
+          persist-credentials: false
+      - name: Install Go
+        uses: actions/setup-go@d8cbb8045d7f43706b9177cceb36c1f91a6644d5 # v7.1.0
+        with:
+          go-version: ${{ matrix.go }}
+          cache: false
+      - name: Verify exact head and patch files
+        run: |
+          test "$(git rev-parse HEAD)" = d0c7ebdd584ea5b7817b453b52e3e78d7fe76946
+          python - <<'PYVERIFY'
+          from pathlib import Path
+          import hashlib
+          expected = {'timer/timer.go': '7145ceb3d5eb7807d8c851abe64c3a7f167e1264702bb48f80b08d2fd606f3d9', 'timer/timer_accuracy_test.go': 'edde3268f3463a032326fd0066baa0a0e35ee37d0a668857624e82f4be9e830b', 'timer/timer_test.go': 'c8eca812db0f51f878a4a1e47fb709d7021beb9e46dce14057554e962815e8d0'}
+          for name, digest in expected.items():
+              actual = hashlib.sha256(Path(name).read_bytes()).hexdigest()
+              print(name, actual)
+              assert actual == digest
+          PYVERIFY
+          go version
+      - name: Download dependencies
+        run: go mod download
+      - name: Build
+        run: go build -v ./...
+      - name: Test
+        run: go test -count=1 ./...
+      - name: Check Go formatting
+        run: test -z "$(gofmt -l timer/timer.go timer/timer_test.go timer/timer_accuracy_test.go)"
+      - name: Check out unchanged upstream base
+        if: matrix.os == 'ubuntu-latest' && matrix.go == '1.27.x'
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          repository: charmbracelet/bubbles
+          ref: 0c1a4915f40343be6d6a3bb3f998db8f069d8b03
+          path: base
+          persist-credentials: false
+      - name: Prepare identical consumer and regression cases
+        if: matrix.os == 'ubuntu-latest' && matrix.go == '1.27.x'
+        run: |
+          mkdir -p ../validation
+          cp timer/timer_accuracy_test.go ../base/timer/
+          cat > ../validation/timer-consumer.go <<'GOFILE'
+          package main
+          
+          import (
+          	"context"
+          	"fmt"
+          	"io"
+          	"os"
+          	"time"
+          
+          	"charm.land/bubbles/v2/timer"
+          	tea "charm.land/bubbletea/v2"
+          )
+          
+          const duration = 250 * time.Millisecond
+          
+          type model struct {
+          	timer       timer.Model
+          	delay       time.Duration
+          	startBefore time.Time
+          	startAfter  time.Time
+          	before      time.Time
+          	after       time.Time
+          	ticks       int
+          	violations  int
+          	timedout    bool
+          }
+          
+          func (m *model) Init() tea.Cmd {
+          	m.startBefore = time.Now()
+          	cmd := m.timer.Init()
+          	m.startAfter = time.Now()
+          	return cmd
+          }
+          
+          func (m *model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
+          	switch msg := msg.(type) {
+          	case timer.TickMsg:
+          		// This consumer deliberately forwards only ticks, as an automatically
+          		// started countdown does not need StartStopMsg handling.
+          		if !m.timer.Running() {
+          			return m, nil
+          		}
+          		time.Sleep(m.delay)
+          		m.before = time.Now()
+          		var cmd tea.Cmd
+          		m.timer, cmd = m.timer.Update(msg)
+          		m.after = time.Now()
+          		m.ticks++
+          		elapsed := duration - m.timer.Timeout
+          		if elapsed < m.before.Sub(m.startAfter)-time.Millisecond || elapsed > m.after.Sub(m.startBefore)+time.Millisecond {
+          			m.violations++
+          		}
+          		return m, cmd
+          	case timer.TimeoutMsg:
+          		m.timedout = true
+          		return m, tea.Quit
+          	}
+          	return m, nil
+          }
+          
+          func (m *model) View() tea.View {
+          	return tea.NewView(m.timer.View())
+          }
+          
+          func main() {
+          	failed := false
+          	for _, delay := range []time.Duration{0, 4 * time.Millisecond} {
+          		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+          		m := &model{timer: timer.New(duration, timer.WithInterval(time.Millisecond)), delay: delay}
+          		_, err := tea.NewProgram(m, tea.WithInput(nil), tea.WithOutput(io.Discard), tea.WithoutRenderer(), tea.WithContext(ctx)).Run()
+          		cancel()
+          		elapsed := duration - m.timer.Timeout
+          		wall := m.before.Sub(m.startAfter)
+          		fmt.Printf("delay=%v ticks=%d wall=%v countdown=%v lag=%v outside_1ms=%d timeout=%v err=%v\n", delay, m.ticks, wall, elapsed, wall-elapsed, m.violations, m.timedout, err)
+          		if err != nil || !m.timedout || m.violations != 0 {
+          			failed = true
+          		}
+          	}
+          	if failed {
+          		os.Exit(1)
+          	}
+          }
+          GOFILE
+      - name: Reproduce failures before patch
+        if: matrix.os == 'ubuntu-latest' && matrix.go == '1.27.x'
+        working-directory: base
+        run: |
+          set +e
+          go test -count=1 -v ./timer -run '^TestTimer' > ../before-tests.log 2>&1
+          result=$?
+          set -e
+          cat ../before-tests.log
+          test "$result" -ne 0
+          grep -F -- '--- FAIL: TestTimerTracksElapsedBetweenUpdates' ../before-tests.log
+          grep -F -- '--- FAIL: TestTimerResumeRejectsPendingInitialTick' ../before-tests.log
+          grep -F -- '--- FAIL: TestTimerDelayedTickCanExpire' ../before-tests.log
+      - name: Run real Bubble Tea consumer before patch
+        if: matrix.os == 'ubuntu-latest' && matrix.go == '1.27.x'
+        working-directory: base
+        run: |
+          set +e
+          go run ../validation/timer-consumer.go > ../consumer-before.log 2>&1
+          result=$?
+          set -e
+          cat ../consumer-before.log
+          test "$result" -ne 0
+          test "$(grep -c '^delay=' ../consumer-before.log)" = 2
+          test "$(grep -c 'timeout=true err=<nil>' ../consumer-before.log)" = 2
+      - name: Run same consumer after patch
+        if: matrix.os == 'ubuntu-latest' && matrix.go == '1.27.x'
+        run: go run ../validation/timer-consumer.go | tee ../consumer-after.log
+      - name: Run focused race check and regressions
+        if: matrix.os == 'ubuntu-latest' && matrix.go == '1.27.x'
+        run: go test -count=1 -race -v ./timer | tee ../timer-after.log
+      - name: Lint with upstream version
+        if: matrix.os == 'ubuntu-latest' && matrix.go == '1.27.x'
+        run: |
+          go install github.com/golangci/golangci-lint/v2/cmd/golangci-lint@v2.13.1
+          golangci-lint run --timeout 10m
